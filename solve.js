@@ -93,6 +93,108 @@ function log(msg) {
     console.log(`[${ts}] ${msg}`);
 }
 
+// ─── Gemini AI Solver ───────────────────────────────────────────
+async function extractProblemDetails(page) {
+    return await page.evaluate(() => {
+        const panel = document.querySelector('#codeeditorpanel') || document.body;
+        const clone = panel.cloneNode(true);
+        const unwanted = clone.querySelectorAll('#txtCodeTbl, #codediv, script, style, canvas, img, button, input[type="submit"]');
+        unwanted.forEach(el => el.remove());
+        return (clone.innerText || clone.textContent || '').trim();
+    });
+}
+
+async function generateSolutionWithGemini(problemText, targetLang, prefix = '', suffix = '') {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+        throw new Error('GEMINI_API_KEY is not defined in your .env file');
+    }
+
+    const systemInstruction = `You are an expert competitive programmer. 
+Your task is to write clean, correct, bug-free code in ${targetLang} to solve the given coding challenge.
+CRITICAL RULES:
+1. Return ONLY the executable code.
+2. Do NOT wrap the code in markdown codeblocks (no \`\`\`${targetLang} or \`\`\`).
+3. Do NOT include any conversational text, explanations, or commentary.
+4. Strictly read input from stdin and write output to stdout.
+5. Cover all boundary conditions and edge cases.
+6. If Prefix or Suffix code is provided, output ONLY the missing code snippet that fits in between.`;
+
+    const userPrompt = `Problem Description:
+${problemText}
+
+Target Language: ${targetLang}
+${prefix ? `\nPrefix Code (already present, do NOT repeat):\n${prefix}\n` : ''}
+${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
+`;
+
+    // Active models supported by user's API tier in order of preference
+    const models = [
+        'gemini-3.6-flash',
+        'gemini-3.7-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemini-3-flash-preview',
+        'gemini-3.1-pro-preview',
+        'gemini-3.5-flash',
+        'gemini-flash-latest'
+    ];
+
+    for (const model of models) {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                const payload = {
+                    contents: [
+                        {
+                            role: 'user',
+                            parts: [{ text: `${systemInstruction}\n\n${userPrompt}` }]
+                        }
+                    ],
+                    generationConfig: {
+                        temperature: 0.1,
+                        maxOutputTokens: 2048,
+                    }
+                };
+
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errText = await response.text();
+                    if (response.status === 404) {
+                        break;
+                    }
+                    log(`  Warning: Gemini model ${model} (attempt ${attempt}) returned ${response.status}`);
+                    if (attempt < 2) {
+                        await sleep(1500);
+                        continue;
+                    }
+                    break;
+                }
+
+                const data = await response.json();
+                const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (candidate) {
+                    let code = candidate.trim();
+                    code = code.replace(/^```[a-zA-Z0-9_+-]*\n?/, '').replace(/\n?```$/, '').trim();
+                    log(`  ✓ Generated with model: ${model}`);
+                    return code;
+                }
+            } catch (err) {
+                log(`  Warning: Gemini request failed with model ${model}: ${err.message}`);
+                if (attempt < 2) await sleep(1000);
+            }
+        }
+    }
+
+    throw new Error('Failed to generate solution with Gemini AI across available models');
+}
+
+
 // ─── Captcha solver ─────────────────────────────────────────────
 // Renders the captcha in the browser via canvas at 4x scale, takes a Playwright
 // screenshot of the canvas, then sends to tesseract with a character whitelist.
@@ -121,7 +223,6 @@ async function solveCaptchaFromPage(page) {
         // Disable smoothing for crisp pixel-perfect scaling
         ctx.imageSmoothingEnabled = false;
         // Draw the captcha image scaled up — keep original colors (dark bg, light text)
-        // Do NOT invert: inversion was distorting digit shapes causing 5→2 etc.
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
         document.body.appendChild(canvas);
@@ -137,11 +238,11 @@ async function solveCaptchaFromPage(page) {
         if (c) c.remove();
     });
 
-    // tesseract.js v4: parameters go in the 4th argument as key-value pairs
+    // tesseract.js: include all math operators in whitelist (+, -, *, x, X, /, =)
     const { data: { text } } = await Tesseract.recognize(screenshotBuffer, 'eng', {
         logger: () => {},
     }, {
-        tessedit_char_whitelist: '0123456789+=',
+        tessedit_char_whitelist: '0123456789+-*xX/=',
         tessedit_pageseg_mode: '6', // PSM 6: single uniform block of text
     });
 
@@ -151,9 +252,12 @@ async function solveCaptchaFromPage(page) {
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
     let arithmeticLine = null;
 
-    // Priority 1: line with both + and =
+    // Priority 1: line with any operator (+, -, *, x, X, /) and =
     for (const line of lines) {
-        if (line.includes('+') && line.includes('=')) { arithmeticLine = line; break; }
+        if (/[\+\-\*xX\/]/.test(line) && line.includes('=')) {
+            arithmeticLine = line;
+            break;
+        }
     }
     // Priority 2: last line containing =
     if (!arithmeticLine) {
@@ -173,46 +277,57 @@ async function solveCaptchaFromPage(page) {
     cleaned = cleaned.replace(/[FBSbs]/g, '8'); // 8 → reads as F, B, or S in this font
     cleaned = cleaned.replace(/[lI|!]/g, '1');  // 1 → reads as l, I, |, !
     cleaned = cleaned.replace(/[Oo]/g, '0');    // 0 → reads as O or o
-    cleaned = cleaned.replace(/[^0-9+=]/g, ''); // strip everything else
+    cleaned = cleaned.replace(/[^0-9\+\-\*xX\/=]/g, ''); // strip everything else except digits, operators, and =
 
     log(`  Arithmetic line (cleaned): "${cleaned}"`);
 
-    // Standard parse: "81+7="
-    let match = cleaned.match(/(\d+)\+(\d+)=/);
-    if (match) {
-        const a = parseInt(match[1], 10);
-        const b = parseInt(match[2], 10);
-        // Captcha numbers are always 1–99; >99 means characters were merged by OCR
-        if (a <= 99 && b <= 99) {
-            log(`  Captcha: ${a} + ${b} = ${a + b}`);
-            return a + b;
+    // Helper to evaluate arithmetic result given two numbers and an operator
+    function evaluateOp(a, op, b) {
+        switch (op) {
+            case '+': return a + b;
+            case '-': return a - b;
+            case '*':
+            case 'x':
+            case 'X': return a * b;
+            case '/': return Math.floor(a / b);
+            default: return a + b;
         }
-        log(`  Parsed ${a}+${b} but numbers >99, likely merged — trying brute-force split`);
     }
 
-    // Fallback: the '+' was misread as a digit or lost entirely
-    // We have something like "0947=" which is actually "09+7=" or "94+7="
-    // Try all possible split positions for "digits="
-    const digitsBeforeEquals = cleaned.replace('=', '');
-    log(`  No '+' found. Trying brute-force split on: "${digitsBeforeEquals}"`);
+    // Standard parse: e.g., "81+7=", "66-8=", "12*4=", "15/3="
+    let match = cleaned.match(/(\d+)\s*([\+\-\*xX\/])\s*(\d+)=/);
+    if (match) {
+        const a = parseInt(match[1], 10);
+        const op = match[2];
+        const b = parseInt(match[3], 10);
+        if (a <= 999 && b <= 999) {
+            const res = evaluateOp(a, op, b);
+            log(`  Captcha: ${a} ${op} ${b} = ${res}`);
+            return res;
+        }
+        log(`  Parsed ${a}${op}${b} but numbers >999, likely merged — trying fallback split`);
+    }
 
-    // The captcha format is A+B= where A and B are 1-2 digit numbers (1-99)
+    // Fallback: the operator was misread as a digit or lost entirely
+    const digitsBeforeEquals = cleaned.replace('=', '');
+    log(`  No clear operator found. Trying brute-force addition split on: "${digitsBeforeEquals}"`);
+
     for (let splitPos = 1; splitPos < digitsBeforeEquals.length; splitPos++) {
         const aStr = digitsBeforeEquals.substring(0, splitPos);
         const bStr = digitsBeforeEquals.substring(splitPos);
         const a = parseInt(aStr, 10);
         const b = parseInt(bStr, 10);
 
-        // Both numbers should be reasonable (1-99 for a simple captcha)
-        if (a >= 1 && a <= 99 && b >= 1 && b <= 99) {
+        if (a >= 1 && a <= 999 && b >= 1 && b <= 999) {
             const result = a + b;
-            log(`  Brute-force split: ${a} + ${b} = ${result} (split at pos ${splitPos})`);
+            log(`  Brute-force fallback split: ${a} + ${b} = ${result} (split at pos ${splitPos})`);
             return result;
         }
     }
 
     throw new Error(`Could not parse arithmetic from: "${arithmeticLine}" (cleaned: "${cleaned}")`);
 }
+
 
 // ─── Login ──────────────────────────────────────────────────────
 async function login(page) {
@@ -404,17 +519,13 @@ async function solveProblem(page, track) {
         }
     }
 
-    // Step 3: Extract target language solution from DOM (it's hidden but present)
-    log(`  Extracting ${track.language} solution...`);
+    // Step 3: Extract solution (1st: DOM existing solution, 2nd: Gemini AI fallback)
+    log(`  Checking for existing ${track.language} solution in DOM...`);
     let solutionCode = await page.evaluate((lang) => {
-        // First try to get from the hidden solution div
-        // The ID is usually 'soln' + Language (e.g. solnPython3, solnC)
         const solnDivId = `#soln${lang.replace(/\s+/g, '')} pre`;
         const solnDiv = document.querySelector(solnDivId);
         if (solnDiv) {
-            // Get text content and clean it
             let text = solnDiv.textContent || solnDiv.innerText || '';
-            // Remove &nbsp; (non-breaking spaces at the end)
             text = text.replace(/\u00a0/g, '').trimEnd();
             return text;
         }
@@ -422,48 +533,40 @@ async function solveProblem(page, track) {
     }, track.language);
 
     if (!solutionCode) {
-        // Fallback: Click "View Solution" then the language to make it visible
-        log('  Solution not in DOM, trying to click View Solution...');
+        // Fallback: Click "View Solution" button if present
         try {
-            await page.click('#showbtn');
-            await sleep(500);
-            // Click language button
-            await page.evaluate((lang) => {
-                if (typeof showHideSoln === 'function') showHideSoln(lang);
-            }, track.language);
-            await sleep(500);
+            const showBtn = page.locator('#showbtn');
+            if (await showBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+                log('  Clicking "View Solution" button to reveal hidden solution...');
+                await showBtn.click();
+                await sleep(500);
+                await page.evaluate((lang) => {
+                    if (typeof showHideSoln === 'function') showHideSoln(lang);
+                }, track.language);
+                await sleep(500);
 
-            solutionCode = await page.evaluate((lang) => {
-                const solnDivId = `#soln${lang.replace(/\s+/g, '')} pre`;
-                const solnDiv = document.querySelector(solnDivId);
-                if (solnDiv) {
-                    let text = solnDiv.textContent || solnDiv.innerText || '';
-                    text = text.replace(/\u00a0/g, '').trimEnd();
-                    return text;
-                }
-                return null;
-            }, track.language);
+                solutionCode = await page.evaluate((lang) => {
+                    const solnDivId = `#soln${lang.replace(/\s+/g, '')} pre`;
+                    const solnDiv = document.querySelector(solnDivId);
+                    if (solnDiv) {
+                        let text = solnDiv.textContent || solnDiv.innerText || '';
+                        return text.replace(/\u00a0/g, '').trimEnd();
+                    }
+                    return null;
+                }, track.language);
+            }
         } catch (e) {
-            log(`  View Solution click failed: ${e.message}`);
+            log(`  View Solution check note: ${e.message}`);
         }
     }
 
-    if (!solutionCode || solutionCode.trim().length === 0) {
-        log(`  FAILED: Could not extract ${track.language} solution.`);
-        await page.screenshot({ path: `debug-no-solution-${Date.now()}.png` });
-        return false;
-    }
-
-    // Step 3b: Handle "Fill in the blanks" by extracting prefix and suffix from the problem page
-    log('  Checking for prefix/suffix (fill-in-the-blanks mode)...');
+    // Check for fill-in-the-blanks template (prefix and suffix)
     const { prefix, suffix } = await page.evaluate(() => {
         let pref = '', suff = '';
         const codediv = document.getElementById('codediv');
         if (codediv) {
-            // Find all <pre> elements inside .ui-outputpanel inside #codediv
             const panels = codediv.querySelectorAll('.ui-outputpanel > pre');
             const txtCode = document.getElementById('txtCode');
-            
             for (let i = 0; i < panels.length; i++) {
                 const pre = panels[i];
                 const panelDiv = pre.parentElement;
@@ -477,46 +580,62 @@ async function solveProblem(page, track) {
         return { prefix: pref, suffix: suff };
     });
 
-    if (prefix || suffix) {
-        log(`  Found prefix (${prefix.length} chars) and/or suffix (${suffix.length} chars). Stripping from solution...`);
-        // We do a robust fuzzy match to find the boundaries
-        solutionCode = await page.evaluate(({ fullCode, p, s }) => {
-            let startIdx = 0;
-            let endIdx = fullCode.length;
+    if (solutionCode && solutionCode.trim().length > 0) {
+        log(`  ✓ Found pre-existing solution in DOM (${solutionCode.length} chars). No AI needed.`);
+        if (prefix || suffix) {
+            log(`  Stripping prefix (${prefix.length} chars) / suffix (${suffix.length} chars) from DOM solution...`);
+            solutionCode = await page.evaluate(({ fullCode, p, s }) => {
+                let startIdx = 0;
+                let endIdx = fullCode.length;
 
-            if (p) {
-                let f = 0, pi = 0;
-                while (f < fullCode.length && pi < p.length) {
-                    if (/\s/.test(fullCode[f]) && /\s/.test(p[pi])) { f++; pi++; continue; }
-                    if (/\s/.test(fullCode[f])) { f++; continue; }
-                    if (/\s/.test(p[pi])) { pi++; continue; }
-                    if (fullCode[f] === p[pi]) { f++; pi++; }
-                    else break;
+                if (p) {
+                    let f = 0, pi = 0;
+                    while (f < fullCode.length && pi < p.length) {
+                        if (/\s/.test(fullCode[f]) && /\s/.test(p[pi])) { f++; pi++; continue; }
+                        if (/\s/.test(fullCode[f])) { f++; continue; }
+                        if (/\s/.test(p[pi])) { pi++; continue; }
+                        if (fullCode[f] === p[pi]) { f++; pi++; }
+                        else break;
+                    }
+                    if (pi === p.length) startIdx = f;
                 }
-                if (pi === p.length) startIdx = f;
-            }
 
-            if (s) {
-                let f = fullCode.length - 1, si = s.length - 1;
-                while (f >= startIdx && si >= 0) {
-                    if (/\s/.test(fullCode[f]) && /\s/.test(s[si])) { f--; si--; continue; }
-                    if (/\s/.test(fullCode[f])) { f--; continue; }
-                    if (/\s/.test(s[si])) { si--; continue; }
-                    if (fullCode[f] === s[si]) { f--; si--; }
-                    else break;
+                if (s) {
+                    let f = fullCode.length - 1, si = s.length - 1;
+                    while (f >= startIdx && si >= 0) {
+                        if (/\s/.test(fullCode[f]) && /\s/.test(s[si])) { f--; si--; continue; }
+                        if (/\s/.test(fullCode[f])) { f--; continue; }
+                        if (/\s/.test(s[si])) { si--; continue; }
+                        if (fullCode[f] === s[si]) { f--; si--; }
+                        else break;
+                    }
+                    if (si < 0) endIdx = f + 1;
                 }
-                if (si < 0) endIdx = f + 1;
-            }
 
-            return fullCode.substring(startIdx, endIdx).replace(/^\n+|\n+$/g, '');
-        }, { fullCode: solutionCode, p: prefix, s: suffix });
-        
-        log(`  Blank code extracted (${solutionCode.length} chars).`);
+                return fullCode.substring(startIdx, endIdx).replace(/^\n+|\n+$/g, '');
+            }, { fullCode: solutionCode, p: prefix, s: suffix });
+        }
     } else {
-        log(`  No prefix/suffix found. Using full solution.`);
+        // AI Fallback: Solution not in DOM, scrape problem and query Gemini
+        log('  ℹ No existing solution found in DOM. Querying Gemini AI...');
+        try {
+            const problemText = await extractProblemDetails(page);
+            log(`  Problem description scraped (${problemText.length} chars). Generating code with Gemini...`);
+            solutionCode = await generateSolutionWithGemini(problemText, track.language, prefix, suffix);
+            log(`  ✓ Gemini generated code successfully (${solutionCode.length} chars).`);
+        } catch (err) {
+            log(`  AI Generation failed: ${err.message}`);
+        }
+    }
+
+    if (!solutionCode || solutionCode.trim().length === 0) {
+        log(`  FAILED: No solution could be obtained (DOM or AI).`);
+        await page.screenshot({ path: `debug-no-solution-${Date.now()}.png` });
+        return false;
     }
 
     log(`  Ready to inject (${solutionCode.length} chars).`);
+
 
     // Step 4: Inject code into the Ace editor using DOM replacement approach
     // Strategy: Set the hidden textarea value FIRST, then call setValue() on Ace.

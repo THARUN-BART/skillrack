@@ -8,8 +8,12 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "solve": "node solve.js"
+    "solve": "node solve.js",
+    "manual": "node manual_solve.js",
+    "assist": "node manual_solve.js",
+    "start": "node solve.js"
   },
+
   "keywords": [],
   "author": "",
   "license": "ISC",
