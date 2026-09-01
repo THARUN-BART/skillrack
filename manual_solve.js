@@ -5,6 +5,12 @@ const readline = require('readline');
 
 // ─── Configuration ──────────────────────────────────────────────
 const CAPTCHA_MAX_RETRIES = 5;
+const MAX_DEBUG_RETRIES = 3;
+const MIN_API_COOLDOWN_MS = 2000;
+
+// Track last API call timestamp to enforce client-side cooldown
+let lastApiCallTimestamp = 0;
+let isSolving = false;
 
 // ─── Utility helpers ────────────────────────────────────────────
 function sleep(ms) {
@@ -16,13 +22,52 @@ function log(msg) {
     console.log(`[${ts}] ${msg}`);
 }
 
-// ─── Gemini AI Solver ───────────────────────────────────────────
+function cleanLanguageName(rawLang) {
+    if (!rawLang) return 'C';
+    const lang = rawLang.trim();
+    if (/python/i.test(lang)) return 'Python3';
+    if (/c\+\+/i.test(lang) || /cpp/i.test(lang)) return 'C++';
+    if (/^c\b/i.test(lang) || /^c\s*\(/i.test(lang)) return 'C';
+    if (/java\b/i.test(lang)) return 'Java';
+    if (/javascript|node/i.test(lang)) return 'JavaScript';
+    return lang.replace(/\s*\([^)]*\)/g, '').trim();
+}
+
+function extractCleanCode(rawText) {
+    if (!rawText) return '';
+    let text = rawText.trim();
+
+    // 1. Match code inside markdown block ```lang ... ```
+    const codeBlockMatch = text.match(/```[^\r\n]*\r?\n([\s\S]*?)```/);
+    if (codeBlockMatch) {
+        text = codeBlockMatch[1];
+    } else {
+        // Fallback: strip leading/trailing backticks
+        text = text.replace(/^```[^\r\n]*\r?\n?/, '').replace(/\r?\n?```$/, '');
+    }
+
+    text = text.trim();
+
+    // 2. Extra safety: Check if Line 1 is an accidental language label (e.g. "Python3 (3.12)", "Python", "C", "C++", "Java")
+    const lines = text.split(/\r?\n/);
+    if (lines.length > 1) {
+        const firstLine = lines[0].trim();
+        if (/^(?:python\d*|c\+\+\d*|cpp\d*|c|java|javascript|node)(?:\s*\([^)]*\))?$/i.test(firstLine)) {
+            lines.shift();
+            text = lines.join('\n').trim();
+        }
+    }
+
+    return text;
+}
+
+// ─── Gemini AI Solver & Debugger ────────────────────────────────
 async function extractProblemDetails(page) {
     return await page.evaluate(() => {
-        // Target the problem description container on the page
         const container = 
             document.querySelector('#programgrid .ui-card-content') ||
             document.querySelector('#programgrid') ||
+            document.querySelector('#codeeditorpanel') ||
             document.body;
 
         const clone = container.cloneNode(true);
@@ -31,14 +76,14 @@ async function extractProblemDetails(page) {
 
         const fullText = (clone.innerText || clone.textContent || '').trim();
 
-        // Window boundary regexes: Start at ProgramID and end at Max Execution Time Limit
+        // Optional boundary trimming if formatted with standard markers
         const startRegex = /ProgramID\s*-\s*\d+/i;
         const endRegex = /Max\s*Execution\s*Time\s*(?:Limit)?\s*:\s*\d+\s*(?:millisecs|ms|seconds|secs)?/i;
 
         const startMatch = fullText.match(startRegex);
         const endMatch = fullText.match(endRegex);
 
-        if (startMatch && endMatch) {
+        if (startMatch && endMatch && startMatch.index < endMatch.index) {
             const startIndex = startMatch.index;
             const endIndex = endMatch.index + endMatch[0].length;
             return fullText.substring(startIndex, endIndex).trim();
@@ -50,20 +95,15 @@ async function extractProblemDetails(page) {
     });
 }
 
-// Track last API call timestamp to enforce client-side cooldown
-let lastApiCallTimestamp = 0;
-const MIN_API_COOLDOWN_MS = 2000;
-
-async function generateSolutionWithGemini(problemText, targetLang, prefix = '', suffix = '') {
+async function callGeminiApi(systemInstruction, userPrompt) {
     const rawApiKey = process.env.GEMINI_API_KEY;
     if (!rawApiKey) {
         throw new Error('GEMINI_API_KEY is not defined in your .env file');
     }
 
-    // Support multiple comma-separated keys if provided (e.g. GEMINI_API_KEY=key1,key2)
     const apiKeys = rawApiKey.split(',').map(k => k.trim()).filter(Boolean);
 
-    // Client-side rate-limit throttling (prevent burst 429s)
+    // Enforce cooldown
     const elapsedSinceLastCall = Date.now() - lastApiCallTimestamp;
     if (elapsedSinceLastCall < MIN_API_COOLDOWN_MS) {
         const waitTime = MIN_API_COOLDOWN_MS - elapsedSinceLastCall;
@@ -71,25 +111,6 @@ async function generateSolutionWithGemini(problemText, targetLang, prefix = '', 
     }
     lastApiCallTimestamp = Date.now();
 
-    const systemInstruction = `You are an expert competitive programmer. 
-Your task is to write clean, correct, bug-free code in ${targetLang} to solve the given coding challenge.
-CRITICAL RULES:
-1. Return ONLY the executable code.
-2. Do NOT wrap the code in markdown codeblocks (no \`\`\`${targetLang} or \`\`\`).
-3. Do NOT include any conversational text, explanations, or commentary.
-4. Strictly read input from stdin and write output to stdout.
-5. Cover all boundary conditions and edge cases.
-6. If Prefix or Suffix code is provided, output ONLY the missing code snippet that fits in between.`;
-
-    const userPrompt = `Problem Description:
-${problemText}
-
-Target Language: ${targetLang}
-${prefix ? `\nPrefix Code (already present, do NOT repeat):\n${prefix}\n` : ''}
-${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
-`;
-
-    // Multi-tier model rotation to distribute quota and avoid single-model 429 limits
     const models = [
         'gemini-3.6-flash',
         'gemini-3.7-flash',
@@ -118,7 +139,7 @@ ${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
                         ],
                         generationConfig: {
                             temperature: 0.1,
-                            maxOutputTokens: 2048,
+                            maxOutputTokens: 4096,
                         }
                     };
 
@@ -132,19 +153,16 @@ ${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
                         const data = await response.json();
                         const candidate = data.candidates?.[0]?.content?.parts?.[0]?.text;
                         if (candidate) {
-                            let code = candidate.trim();
-                            code = code.replace(/^```[a-zA-Z0-9_+-]*\n?/, '').replace(/\n?```$/, '').trim();
-                            log(`  ✓ Generated with model: ${model}`);
-                            return code;
+                            const cleanCode = extractCleanCode(candidate);
+                            log(`  ✓ Generated with model: ${model} (${cleanCode.split('\n').length} lines)`);
+                            return cleanCode;
                         }
                     }
 
                     if (response.status === 404) {
-                        // Model not available on this endpoint, skip immediately
                         continue;
                     } else if (response.status === 429) {
-                        log(`  ⚠️ Model ${model} returned 429 (Rate Limit). Rotating to next model...`);
-                        // Brief pause to not hammer endpoint, then try next model
+                        log(`  ⚠️ Model ${model} returned 429 (Rate Limit). Rotating model...`);
                         await sleep(500);
                         continue;
                     } else if (response.status === 503) {
@@ -152,7 +170,7 @@ ${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
                         continue;
                     } else {
                         const errText = await response.text().catch(() => '');
-                        log(`  Warning: Gemini model ${model} returned status ${response.status}: ${errText.substring(0, 120)}`);
+                        log(`  Warning: Gemini model ${model} status ${response.status}: ${errText.substring(0, 100)}`);
                         continue;
                     }
                 } catch (err) {
@@ -162,12 +180,65 @@ ${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
         }
 
         if (pass < maxPasses) {
-            log('⏳ Rate limits active across models. Waiting 5s cooldown before second attempt...');
+            log('⏳ Rate limit active across models. Waiting 5s cooldown before second attempt...');
             await sleep(5000);
         }
     }
 
-    throw new Error('All Gemini models are temporarily rate-limited (429). Please wait a few seconds and try again.');
+    throw new Error('All Gemini models are temporarily busy or rate-limited. Please retry shortly.');
+}
+
+async function generateSolutionWithGemini(problemText, targetLang, prefix = '', suffix = '') {
+    const systemInstruction = `You are an expert competitive programmer. 
+Your task is to write clean, correct, bug-free code in ${targetLang} to solve the given coding challenge.
+CRITICAL RULES:
+1. Return ONLY the executable code inside a markdown code block (\`\`\`${targetLang} ... \`\`\`).
+2. Do NOT include any conversational text, explanations, or commentary.
+3. Strictly read input from stdin and write output to stdout.
+4. Cover all boundary conditions and edge cases.
+5. If Prefix or Suffix code is provided, output ONLY the missing code snippet that fits in between.`;
+
+    const userPrompt = `Problem Description:
+${problemText}
+
+Target Language: ${targetLang}
+${prefix ? `\nPrefix Code (already present, do NOT repeat):\n${prefix}\n` : ''}
+${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
+`;
+
+    return await callGeminiApi(systemInstruction, userPrompt);
+}
+
+async function debugSolutionWithGemini(problemText, targetLang, currentCode, executionError, prefix = '', suffix = '') {
+    const systemInstruction = `You are an expert competitive programmer and code debugger.
+The provided ${targetLang} solution failed on SkillRack with errors or wrong test outputs.
+Your task is to analyze the problem, the failing code, and the error logs, fix ALL bugs, and return the complete corrected code.
+
+CRITICAL RULES:
+1. Return ONLY the executable corrected code inside a markdown code block (\`\`\`${targetLang} ... \`\`\`).
+2. Do NOT include explanations, markdown notes, or commentary.
+3. Strictly read input from stdin and write output to stdout.
+4. Fix edge cases, off-by-one errors, formatting issues, and data type overflow.
+5. If Prefix or Suffix code is present, return ONLY the code that fills the gap between them.`;
+
+    const userPrompt = `Problem Description:
+${problemText}
+
+Target Language: ${targetLang}
+${prefix ? `\nPrefix Code (already present, do NOT repeat):\n${prefix}\n` : ''}
+${suffix ? `\nSuffix Code (already present, do NOT repeat):\n${suffix}\n` : ''}
+
+Currently Failing Code:
+\`\`\`${targetLang}
+${currentCode}
+\`\`\`
+
+Execution / Test Result Output from SkillRack:
+${executionError}
+
+Please provide the completely corrected and working code.`;
+
+    return await callGeminiApi(systemInstruction, userPrompt);
 }
 
 // ─── Captcha solver ─────────────────────────────────────────────
@@ -304,11 +375,141 @@ async function loginIfRequired(page) {
     }
 }
 
-// Concurrency mutex lock to prevent simultaneous calls
-let isSolving = false;
+// ─── Ace Editor Code Injector ───────────────────────────────────
+async function injectCodeToPage(page, code) {
+    return await page.evaluate((codeToInject) => {
+        // 1. Set the hidden textarea
+        const textarea = document.getElementById('txtCode');
+        if (textarea) {
+            textarea.value = codeToInject;
+            if (typeof $ !== 'undefined') {
+                $('#txtCode').val(codeToInject).trigger('input').trigger('change');
+            }
+        }
+
+        // 2. Set Ace Editor via global txtCode
+        if (typeof txtCode !== 'undefined') {
+            if (typeof txtCode.setValue === 'function') {
+                txtCode.setValue(codeToInject, -1);
+            } else if (txtCode.getSession && typeof txtCode.getSession().setValue === 'function') {
+                txtCode.getSession().setValue(codeToInject);
+            }
+            if (typeof txtCode.clearSelection === 'function') {
+                txtCode.clearSelection();
+            }
+        }
+
+        // 3. Check for any ace editor in DOM
+        const aceEl = document.querySelector('.ace_editor');
+        if (aceEl && aceEl.env && aceEl.env.editor) {
+            aceEl.env.editor.setValue(codeToInject, -1);
+            aceEl.env.editor.clearSelection();
+        }
+
+        // 4. Trigger cs() sync function if present
+        if (typeof cs === 'function') {
+            try { cs(); } catch (e) {}
+        }
+
+        // 5. Read back current value in editor to verify
+        let editorVal = '';
+        if (typeof txtCode !== 'undefined' && txtCode.getValue) {
+            editorVal = txtCode.getValue();
+        } else if (aceEl && aceEl.env && aceEl.env.editor) {
+            editorVal = aceEl.env.editor.getValue();
+        } else if (textarea) {
+            editorVal = textarea.value;
+        }
+
+        return {
+            lines: editorVal ? editorVal.split('\n').length : 0,
+            length: editorVal ? editorVal.length : 0,
+            content: editorVal
+        };
+    }, code);
+}
+
+// ─── Test Runner & AI Auto-Debugger ─────────────────────────────
+async function runAndAutoDebug(page, problemText, targetLang, prefix, suffix, maxRetries = MAX_DEBUG_RETRIES) {
+    log('\n🚀 Running code and verifying test cases on SkillRack...');
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        // Trigger cs() sync before clicking Run
+        await page.evaluate(() => {
+            if (typeof cs === 'function') {
+                try { cs(); } catch (e) {}
+            }
+        });
+
+        const runBtn = page.locator('button#j_id_bg, button:has-text("Run")').first();
+        if (await runBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await runBtn.click();
+        } else {
+            await page.click('button#j_id_bg');
+        }
+
+        log('  Waiting for test case execution...');
+        await page.waitForFunction(() => {
+            const panel = document.querySelector('#progresspanel');
+            if (!panel) return false;
+            const text = panel.textContent || '';
+            return text.includes('SUCCESS') || text.includes('passed') ||
+                   text.includes('FAIL') || text.includes('Error') ||
+                   text.includes('Compilation') || text.includes('Wrong');
+        }, { timeout: 35000 }).catch(() => {});
+
+        const result = await page.evaluate(() => {
+            const panel = document.querySelector('#progresspanel');
+            if (!panel) return '';
+            return (panel.innerText || panel.textContent || '').trim();
+        });
+
+        if (result.includes('SUCCESS') || result.includes('passed') || result.includes('All test cases passed')) {
+            log('\n🎉 ✅ ALL TEST CASES PASSED! Problem solved successfully.');
+            return true;
+        }
+
+        log(`\n❌ Test Execution Failed (Attempt ${attempt + 1}/${maxRetries + 1}):`);
+        log(`--------------------------------------------------`);
+        log(result.substring(0, 300));
+        log(`--------------------------------------------------`);
+
+        if (attempt < maxRetries) {
+            // Read currently failing code from editor
+            const currentCode = await page.evaluate(() => {
+                if (typeof txtCode !== 'undefined' && txtCode.getValue) return txtCode.getValue();
+                const textarea = document.getElementById('txtCode');
+                return textarea ? textarea.value : '';
+            });
+
+            log(`🤖 Asking Gemini AI to analyze the failure & debug the code...`);
+            try {
+                const fixedCode = await debugSolutionWithGemini(
+                    problemText,
+                    targetLang,
+                    currentCode,
+                    result,
+                    prefix,
+                    suffix
+                );
+
+                const injectStats = await injectCodeToPage(page, fixedCode);
+                log(`✓ Injected debugged code (${injectStats.lines} lines, ${injectStats.length} chars). Retesting...`);
+                await sleep(1500);
+            } catch (err) {
+                log(`⚠️ Auto-debug generation failed: ${err.message}`);
+                break;
+            }
+        } else {
+            log('⚠️ Maximum debug attempts reached. You can review the code in the editor.');
+        }
+    }
+
+    return false;
+}
 
 // ─── Solve Current Open Problem ─────────────────────────────────
-async function handleCurrentProblem(page, options = { autoRun: false, preferredLang: null }) {
+async function handleCurrentProblem(page, options = { autoRun: false, preferredLang: null, lastCodeHolder: null }) {
     if (isSolving) {
         log('⚠️ A problem solve is already in progress. Please wait for it to finish.');
         return false;
@@ -320,181 +521,140 @@ async function handleCurrentProblem(page, options = { autoRun: false, preferredL
         log('Detecting and solving current problem...');
         log('═══════════════════════════════════════════════════');
 
-    // 1. Check if captcha is on screen and solve it
-    const captchaImg = page.locator('#codeeditorpanel img[src^="data:image"]');
-    if (await captchaImg.isVisible({ timeout: 1500 }).catch(() => false)) {
-        log('Captcha detected! Solving captcha...');
-        let captchaSolved = false;
-        for (let attempt = 1; attempt <= CAPTCHA_MAX_RETRIES; attempt++) {
-            try {
-                const answer = await solveCaptchaFromPage(page);
-                await page.fill('input#capval', String(answer));
-                await page.click('button#proceedbtn');
+        // 1. Check if captcha is on screen and solve it
+        const captchaImg = page.locator('#codeeditorpanel img[src^="data:image"]');
+        if (await captchaImg.isVisible({ timeout: 1500 }).catch(() => false)) {
+            log('Captcha detected! Solving captcha...');
+            let captchaSolved = false;
+            for (let attempt = 1; attempt <= CAPTCHA_MAX_RETRIES; attempt++) {
+                try {
+                    const answer = await solveCaptchaFromPage(page);
+                    await page.fill('input#capval', String(answer));
+                    await page.click('button#proceedbtn');
 
-                let editorAppeared = false;
-                for (let poll = 0; poll < 10; poll++) {
-                    await sleep(500);
-                    const state = await page.evaluate(() => {
-                        const tbl = document.querySelector('#txtCodeTbl');
-                        return tbl && tbl.style.display !== 'none';
-                    });
-                    if (state) { editorAppeared = true; break; }
-                }
-                if (editorAppeared) {
-                    captchaSolved = true;
-                    log('✓ Captcha solved successfully.');
+                    let editorAppeared = false;
+                    for (let poll = 0; poll < 10; poll++) {
+                        await sleep(500);
+                        const state = await page.evaluate(() => {
+                            const tbl = document.querySelector('#txtCodeTbl');
+                            return tbl && tbl.style.display !== 'none';
+                        });
+                        if (state) { editorAppeared = true; break; }
+                    }
+                    if (editorAppeared) {
+                        captchaSolved = true;
+                        log('✓ Captcha solved successfully.');
+                        await sleep(1000);
+                        break;
+                    }
+                } catch (err) {
+                    log(`Captcha attempt ${attempt} error: ${err.message}`);
                     await sleep(1000);
-                    break;
-                }
-            } catch (err) {
-                log(`Captcha attempt ${attempt} error: ${err.message}`);
-                await sleep(1000);
-            }
-        }
-        if (!captchaSolved) {
-            log('⚠️ Failed to solve captcha automatically. You can solve it manually in the browser.');
-        }
-    }
-
-    // 2. Detect target language
-    let currentLang = await page.evaluate(() => {
-        const label = document.querySelector('#langs_label');
-        return label ? label.textContent.trim() : '';
-    }).catch(() => '');
-
-    let targetLang = options.preferredLang || currentLang || 'C';
-    log(`Target Language: ${targetLang} (Current selected on page: "${currentLang || 'None'}")`);
-
-    // If preferredLang is set and different from currentLang, switch it
-    if (options.preferredLang && currentLang && !currentLang.includes(options.preferredLang)) {
-        try {
-            log(`Switching language dropdown to ${options.preferredLang}...`);
-            await page.click('#langs_label');
-            await sleep(500);
-            const langItem = page.locator('#langs_panel li').filter({ hasText: options.preferredLang });
-            if (await langItem.count() > 0) {
-                await langItem.first().click();
-                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-                await sleep(1500);
-            }
-        } catch (e) {
-            log(`Note on switching language: ${e.message}`);
-        }
-    }
-
-    // 3. Extract Prefix & Suffix if fill-in-the-blanks
-    const { prefix, suffix } = await page.evaluate(() => {
-        let pref = '', suff = '';
-        const codediv = document.getElementById('codediv');
-        if (codediv) {
-            const panels = codediv.querySelectorAll('.ui-outputpanel > pre');
-            const txtCode = document.getElementById('txtCode');
-            for (let i = 0; i < panels.length; i++) {
-                const pre = panels[i];
-                const panelDiv = pre.parentElement;
-                if (txtCode && (panelDiv.compareDocumentPosition(txtCode) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-                    pref = pre.textContent || pre.innerText || '';
-                } else if (txtCode && (txtCode.compareDocumentPosition(panelDiv) & Node.DOCUMENT_POSITION_FOLLOWING)) {
-                    suff = pre.textContent || pre.innerText || '';
                 }
             }
+            if (!captchaSolved) {
+                log('⚠️ Failed to solve captcha automatically. You can solve it manually in the browser.');
+            }
         }
-        return { prefix: pref, suffix: suff };
-    }).catch(() => ({ prefix: '', suffix: '' }));
 
-    if (prefix) log(`  Prefix detected (${prefix.length} chars)`);
-    if (suffix) log(`  Suffix detected (${suffix.length} chars)`);
+        // 2. Detect target language
+        let currentLang = await page.evaluate(() => {
+            const label = document.querySelector('#langs_label');
+            return label ? label.textContent.trim() : '';
+        }).catch(() => '');
 
-    // 4. Check for pre-existing DOM solution or View Solution button
-    let solutionCode = await page.evaluate((lang) => {
-        const solnDiv = document.querySelector(`#soln${lang.replace(/\s+/g, '')} pre`);
-        if (solnDiv) {
-            return (solnDiv.textContent || solnDiv.innerText || '').replace(/\u00a0/g, '').trimEnd();
+        let rawLang = options.preferredLang || currentLang || 'C';
+        let targetLang = cleanLanguageName(rawLang);
+        log(`Target Language: ${targetLang} (Detected from page: "${currentLang || 'None'}")`);
+
+        // If preferredLang is set and different from currentLang, switch it
+        if (options.preferredLang && currentLang && !currentLang.includes(options.preferredLang)) {
+            try {
+                log(`Switching language dropdown to ${options.preferredLang}...`);
+                await page.click('#langs_label');
+                await sleep(500);
+                const langItem = page.locator('#langs_panel li').filter({ hasText: options.preferredLang });
+                if (await langItem.count() > 0) {
+                    await langItem.first().click();
+                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+                    await sleep(1500);
+                }
+            } catch (e) {
+                log(`Note on switching language: ${e.message}`);
+            }
         }
-        return null;
-    }, targetLang).catch(() => null);
 
-    if (!solutionCode) {
-        // Scrape problem text and generate with Gemini
+        // 3. Extract Prefix & Suffix if fill-in-the-blanks
+        const { prefix, suffix } = await page.evaluate(() => {
+            let pref = '', suff = '';
+            const codediv = document.getElementById('codediv');
+            if (codediv) {
+                const panels = codediv.querySelectorAll('.ui-outputpanel > pre');
+                const txtCode = document.getElementById('txtCode');
+                for (let i = 0; i < panels.length; i++) {
+                    const pre = panels[i];
+                    const panelDiv = pre.parentElement;
+                    if (txtCode && (panelDiv.compareDocumentPosition(txtCode) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                        pref = pre.textContent || pre.innerText || '';
+                    } else if (txtCode && (txtCode.compareDocumentPosition(panelDiv) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+                        suff = pre.textContent || pre.innerText || '';
+                    }
+                }
+            }
+            return { prefix: pref, suffix: suff };
+        }).catch(() => ({ prefix: '', suffix: '' }));
+
+        if (prefix) log(`  Prefix detected (${prefix.length} chars)`);
+        if (suffix) log(`  Suffix detected (${suffix.length} chars)`);
+
+        // 4. Scrape problem text
         log('Extracting question description...');
         const problemText = await extractProblemDetails(page);
         if (!problemText || problemText.length < 10) {
             log('⚠️ Could not extract problem description. Make sure you are on a problem page (#codeeditorpanel).');
             return false;
         }
-
         log(`Scraped question (${problemText.length} characters).`);
+
+        // 5. Generate solution with Gemini AI
         log('Calling Gemini AI to generate solution...');
+        let solutionCode = '';
         try {
             solutionCode = await generateSolutionWithGemini(problemText, targetLang, prefix, suffix);
-            log(`✓ Solution generated by Gemini AI (${solutionCode.length} chars).`);
         } catch (err) {
             log(`❌ Gemini AI Error: ${err.message}`);
             return false;
         }
-    } else {
-        log(`✓ Found existing solution in DOM (${solutionCode.length} chars).`);
-    }
 
-    // 5. Inject solution into Ace Editor
-    log('Injecting solution into Ace Editor...');
-    try {
-        await page.evaluate((code) => {
-            const textarea = document.getElementById('txtCode');
-            if (textarea) {
-                if (typeof $ !== 'undefined') $('#txtCode').val(code);
-                else textarea.value = code;
-            }
-            if (typeof txtCode !== 'undefined' && txtCode.getSession) {
-                txtCode.getSession().setValue(code);
-            }
-        }, solutionCode);
-
-        log('✓ Code successfully placed in editor!');
-    } catch (err) {
-        log(`❌ Error injecting code: ${err.message}`);
-        return false;
-    }
-
-    // 6. Optionally Run / Test
-    if (options.autoRun) {
-        log('Running test cases...');
-        try {
-            await page.evaluate(() => {
-                if (typeof cs === 'function') cs();
-            });
-            await page.click('button#j_id_bg');
-
-            await page.waitForFunction(() => {
-                const panel = document.querySelector('#progresspanel');
-                if (!panel) return false;
-                const text = panel.textContent || '';
-                return text.includes('SUCCESS') || text.includes('passed') ||
-                       text.includes('FAIL') || text.includes('Error') ||
-                       text.includes('Compilation');
-            }, { timeout: 30000 });
-
-            const result = await page.evaluate(() => {
-                const panel = document.querySelector('#progresspanel');
-                return panel ? panel.textContent.trim() : '';
-            });
-
-            if (result.includes('SUCCESS') || result.includes('passed')) {
-                log('🎉 Passed all test cases!');
-            } else {
-                log(`Result: ${result.substring(0, 150)}`);
-            }
-        } catch (e) {
-            log(`Run note: ${e.message}`);
+        if (!solutionCode || solutionCode.trim().length === 0) {
+            log('❌ No code was generated.');
+            return false;
         }
-    } else {
-        log('ℹ Code is ready in editor. You can review and click "Run" in your browser.');
-    }
 
-    return true;
-} finally {
-    isSolving = false;
-}
+        if (options.lastCodeHolder) {
+            options.lastCodeHolder.code = solutionCode;
+            options.lastCodeHolder.problemText = problemText;
+            options.lastCodeHolder.targetLang = targetLang;
+            options.lastCodeHolder.prefix = prefix;
+            options.lastCodeHolder.suffix = suffix;
+        }
+
+        // 6. Inject solution into Ace Editor
+        log('Injecting solution into Ace Editor...');
+        const injectStats = await injectCodeToPage(page, solutionCode);
+        log(`✓ Successfully placed ${injectStats.lines} lines (${injectStats.length} characters) into editor!`);
+
+        // 7. Auto-Run & Auto-Debug if requested
+        if (options.autoRun) {
+            await runAndAutoDebug(page, problemText, targetLang, prefix, suffix);
+        } else {
+            log('ℹ Code is ready in editor. Type "r" to run & auto-debug, or "p" to preview full code in terminal.');
+        }
+
+        return true;
+    } finally {
+        isSolving = false;
+    }
 }
 
 // ─── Main Interactive Runner ────────────────────────────────────
@@ -513,16 +673,18 @@ async function handleCurrentProblem(page, options = { autoRun: false, preferredL
 
     console.log(`
 ╔═══════════════════════════════════════════════════════════════════════════════════╗
-║                    SKILLRACK MANUAL / ASSISTANT MODE                              ║
+║               SKILLRACK ASSISTANT + GEMINI AI DEBUGGER                            ║
 ╚═══════════════════════════════════════════════════════════════════════════════════╝
   Navigate to ANY problem you want in the opened Chrome window.
 
   Commands in this terminal:
-  • Press [ENTER] or type 's'   -> Automatically solve whatever problem is open!
-  • Type 'r'                     -> Solve and auto-run test cases!
-  • Type 'watch' or 'w'          -> Toggle auto-watch mode (auto-solves when problem opens)
-  • Type 'lang <language>'       -> Set preferred language (e.g. 'lang Python3', 'lang C')
-  • Type 'q' or 'exit'           -> Close browser and exit
+  • [ENTER] or 's'        -> Solve and place full code in editor
+  • 'r' or 'run'          -> Solve, inject, run tests & AUTO-DEBUG with Gemini on failure!
+  • 'd' or 'debug'        -> Analyze current editor error & auto-debug with Gemini!
+  • 'p' or 'print'        -> Print full generated code in this terminal
+  • 'watch' or 'w'        -> Toggle auto-solve mode when opening any problem
+  • 'lang <language>'     -> Set preferred language (e.g. 'lang Python3', 'lang C')
+  • 'q' or 'exit'         -> Close browser and exit
 ═══════════════════════════════════════════════════════════════════════════════════
 `);
 
@@ -530,6 +692,7 @@ async function handleCurrentProblem(page, options = { autoRun: false, preferredL
     let autoRun = false;
     let preferredLang = null;
     let lastProblemHash = '';
+    const lastCodeHolder = { code: '', problemText: '', targetLang: '', prefix: '', suffix: '' };
 
     const rl = readline.createInterface({
         input: process.stdin,
@@ -560,7 +723,7 @@ async function handleCurrentProblem(page, options = { autoRun: false, preferredL
                 if (currentHash !== lastProblemHash && probTextSample.length > 5) {
                     lastProblemHash = currentHash;
                     log('\n[Auto-Watch] New problem detected on screen!');
-                    await handleCurrentProblem(page, { autoRun, preferredLang });
+                    await handleCurrentProblem(page, { autoRun, preferredLang, lastCodeHolder });
                     rl.prompt();
                 }
             }
@@ -578,22 +741,40 @@ async function handleCurrentProblem(page, options = { autoRun: false, preferredL
             process.exit(0);
         } else if (cmd === 'watch' || cmd === 'w') {
             autoWatch = !autoWatch;
-            log(`Auto-Watch mode is now: ${autoWatch ? 'ENABLED (will auto-solve when you open a problem)' : 'DISABLED'}`);
+            log(`Auto-Watch mode is now: ${autoWatch ? 'ENABLED (auto-solves when problem opens)' : 'DISABLED'}`);
         } else if (cmd === 'r' || cmd === 'run') {
-            await handleCurrentProblem(page, { autoRun: true, preferredLang });
+            await handleCurrentProblem(page, { autoRun: true, preferredLang, lastCodeHolder });
+        } else if (cmd === 'd' || cmd === 'debug') {
+            log('\n🔍 Manual Debug Triggered: Reading problem & error from page...');
+            const problemText = await extractProblemDetails(page);
+            const currentLang = await page.evaluate(() => {
+                const label = document.querySelector('#langs_label');
+                return label ? label.textContent.trim() : '';
+            }).catch(() => '');
+            const targetLang = cleanLanguageName(preferredLang || currentLang || 'C');
+            await runAndAutoDebug(page, problemText, targetLang, lastCodeHolder.prefix, lastCodeHolder.suffix);
+        } else if (cmd === 'p' || cmd === 'print' || cmd === 'show') {
+            if (lastCodeHolder.code) {
+                console.log('\n────────── FULL GENERATED CODE ──────────');
+                console.log(lastCodeHolder.code);
+                console.log('─────────────────────────────────────────\n');
+            } else {
+                log('No code generated yet. Press Enter or type "s" to solve first.');
+            }
         } else if (cmd.startsWith('lang ')) {
             preferredLang = line.trim().substring(5).trim();
             log(`Preferred language set to: "${preferredLang}"`);
         } else if (cmd === 'help' || cmd === 'h' || cmd === '?') {
             console.log(`Commands:
   [ENTER] / s     - Solve current problem on screen
-  r / run         - Solve & run test cases
+  r / run         - Solve, inject & AUTO-DEBUG with Gemini until all tests pass
+  d / debug       - Re-run and debug current code with Gemini
+  p / print       - Show full generated code in this terminal
   watch / w       - Toggle auto-solve watch mode
   lang <language> - Set preferred language (e.g. lang C, lang Python3, lang Java)
   q / exit        - Quit`);
         } else {
-            // Default or empty Enter / 's' -> solve current
-            await handleCurrentProblem(page, { autoRun, preferredLang });
+            await handleCurrentProblem(page, { autoRun: false, preferredLang, lastCodeHolder });
         }
 
         rl.prompt();

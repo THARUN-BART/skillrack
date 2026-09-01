@@ -1,0 +1,37 @@
+[
+  {
+    "header": "Java Basics - Programming Course (Hands-On)",
+    "desc": "Contains the following chapters.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "Java Basics - Programming Course (Hands-On) | Contains the following chapters. | Java-H001 Primitive Data Types/Operators/Conditional Flow Statements | Java-H002 Arrays & String                                             | Java-H003 Class & Object Variables/Methods Intro                      | Java-H004 Package & import                                            | Java-H005 Class & Inheritance                                         | Java-H006 Numbers - Format                                            | Java-H007 Interface                                                   | Java-H008A Collections - List                                         | Java-H008B Collections - Set Map Queue etc                            | Java-H009 Access Modifiers (public, private, static, default)         | Java-H010 Exceptions                                                  | Java-H011 Nested classes Lambda Expressions                           | Java-H012 File I/O Basics                                             | Java-H013 Annotations Basics                                          | Java-H014 Generics Basics                                             | Java-H015 Regular Expression Basics                                   |   | Show"
+  },
+  {
+    "header": "JAVA - STARTER",
+    "desc": "Contains 80+ challenges related to beginners in programming.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "JAVA - STARTER | Contains 80+ challenges related to beginners in programming. | Show"
+  },
+  {
+    "header": "JAVA - 50 VERY-EASY CHALLENGES",
+    "desc": "Contains 50 Very-Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just started to learn Java.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "JAVA - 50 VERY-EASY CHALLENGES | Contains 50 Very-Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just started to learn Java. |   | Show"
+  },
+  {
+    "header": "JAVA - 50 EASY CHALLENGES",
+    "desc": "Contains 50 Easy level programming challenges focusing on the basic programming syntax",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "JAVA - 50 EASY CHALLENGES | Contains 50 Easy level programming challenges focusing on the basic programming syntax | Show"
+  },
+  {
+    "header": "JAVA - 50 AVERAGE CHALLENGES",
+    "desc": "Contains 50 AVERAGE level programming challenges focusing on problem solving logic. Suitable for users who have completed VERY-EASY and EASY level practice challenges.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "JAVA - 50 AVERAGE CHALLENGES | Contains 50 AVERAGE level programming challenges focusing on problem solving logic. Suitable for users who have completed VERY-EASY and EASY level practice challenges. | Show"
+  }
+]

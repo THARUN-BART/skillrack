@@ -1,0 +1,14 @@
+[
+  {
+    "btn": "ui-button",
+    "text": "ui-button"
+  },
+  {
+    "btn": "Proceed to Solve the Program",
+    "text": "Java Programming | Java Basics - Programming Course (Hands-On) | Java-H001 Primitive Data Types/Operators/Conditional Flow Statements | Object Class Introduction | Object - Introduction | Objects have two characteristics - state and behaviour. | The state is represented by fields (also called variables). | The behaviour is represented by methods (also called functions). | Let us take a dog as an example. | The state of the dog can be | - age of the dog | - breed of the dog (like Labrador, Bulldog) | - color of the dog | The behaviour of the dog can be | - barking | - wagging the tail | Class - Introduction: | The state and the behaviour is composed in a blueprint/template called class. | An instance of a class is called an object. | The below code represents class Dog | public class Dog { |     private String name; |     public void bark() { |         System.out.println(\"Bow Wow\"); |     } |     public String getName() { |         return name; |     } |     public void setName(String name) { |         this.name = name; |     } | } | Let us say there are two dogs in our neighbourhood with their names as Jimmy and Rock. | We use the above class Dog to create two instances (objects) dog1 and dog2 as in the code given below. | The keyword new is used to create objects (that is instances of a class). | public class Hello { |     public static void main(String[] args) { |         Dog dog1 = new Dog(); |         dog1.setName(\"Jimmy\"); |         Dog dog2 = new Dog(); |         dog2.setName(\"Rock\"); |     } | } |   | ProgramID- 1623  SKILLRACK | Object - class introduction | The student class is given below. | public class Student { |     private String name; |     private String registrationNumber; |     public String getName() { |         return name; |     } |     public void setName(String name) { |         this.name = name; |     } |     public String getRegistrationNumber() { |         return registrationNumber; |     } |     public void setRegistrationNumber(String registrationNumber) { |         this.registrationNumber = registrationNumber; |     } | } | Fill in the missing lines of code so that the below program prints the student's name as Larsen and the registration number as 12345 | Hint: Use the setName and setRegistrationNumber methods to set the values. | Max Execution Time Limit: 5000 millisecs | Proceed to Solve the Program"
+  },
+  {
+    "btn": "Proceed to Solve the Program",
+    "text": "Proceed to Solve the Program"
+  }
+]

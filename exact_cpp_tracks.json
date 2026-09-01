@@ -1,0 +1,37 @@
+[
+  {
+    "header": "C++ Primer",
+    "desc": "Contains C++ Basic Tracks",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "C++ Primer | Contains C++ Basic Tracks | Show"
+  },
+  {
+    "header": "C++ - STARTER",
+    "desc": "Contains 30+ challenges related to beginners in programming.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "C++ - STARTER | Contains 30+ challenges related to beginners in programming. | Show"
+  },
+  {
+    "header": "C++ - 50 VERY-EASY CHALLENGES",
+    "desc": "Contains 50 Very-Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just started to learn C++",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "C++ - 50 VERY-EASY CHALLENGES | Contains 50 Very-Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just started to learn C++ | Show"
+  },
+  {
+    "header": "C++ - 50 EASY CHALLENGES",
+    "desc": "Contains 50 Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just solved Very-Easy challenges.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "C++ - 50 EASY CHALLENGES | Contains 50 Easy level programming challenges focusing on the basic programming syntax. Suitable for users who have just solved Very-Easy challenges. | Show"
+  },
+  {
+    "header": "C++ - 50 AVERAGE CHALLENGES",
+    "desc": "Contains 50 AVERAGE level programming challenges focusing on basic problem solving techniques. Suitable for users who have just solved Easy challenges.",
+    "btn": "Show",
+    "status": "Available",
+    "fullText": "C++ - 50 AVERAGE CHALLENGES | Contains 50 AVERAGE level programming challenges focusing on basic problem solving techniques. Suitable for users who have just solved Easy challenges. | Show"
+  }
+]

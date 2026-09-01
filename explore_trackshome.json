@@ -1,0 +1,80 @@
+{
+  "links": [
+    {
+      "text": "Home",
+      "href": "/faces/ui/profile.xhtml"
+    },
+    {
+      "text": "Reports",
+      "href": "/faces/candidate/reporthome.xhtml"
+    },
+    {
+      "text": "Profile",
+      "href": "/faces/candidate/manageprofile.xhtml"
+    },
+    {
+      "text": "Help",
+      "href": "/faces/candidate/help.xhtml"
+    },
+    {
+      "text": "Logout",
+      "href": "#"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/lev1.xhtml"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=2"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=3"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=4"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=5"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=6"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/codeprogramgroup.xhtml?gt=CODETRACK&lev=100"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/webinarcodetrack.xhtml"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/labcodeprograms.xhtml?type=LAB"
+    },
+    {
+      "text": "View",
+      "href": "/faces/candidate/viewsolved.xhtml"
+    },
+    {
+      "text": "Light",
+      "href": "#"
+    },
+    {
+      "text": "Dark",
+      "href": "#"
+    },
+    {
+      "text": "Dark-Blue",
+      "href": "#"
+    }
+  ],
+  "cards": [
+    "Programs Solved 1158 Tutorials 145 Tracks 996 Tests 15 DC/DT 1 | Level 1 | View | Level 2 | View | Level 3 | View | Level 4 | View | Level 5 | View | Level 6 | View | Prime | View | LACS | View | LAB | View | View Solved | View",
+    "Programs Solved 1158 Tutorials 145 Tracks 996 Tests 15 DC/DT 1 | Level 1 | View | Level 2 | View | Level 3 | View | Level 4 | View | Level 5 | View | Level 6 | View | Prime | View | LACS | View | LAB | View | View Solved | View"
+  ]
+}
