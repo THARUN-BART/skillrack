@@ -691,7 +691,8 @@ async function solveProblem(page, track) {
             return label ? label.textContent.trim() : '';
         });
 
-        let targetRegex = new RegExp(`^${track.language}$`, 'i');
+        const escapedLanguage = track.language.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        let targetRegex = new RegExp(`^${escapedLanguage}$`, 'i');
         if (track.language === 'C++') {
             targetRegex = /C\+\+|CPP/i;
         } else if (track.language === 'Python3') {
@@ -740,19 +741,21 @@ async function solveProblem(page, track) {
     log(`  Checking for existing solution in DOM...`);
     let solutionCode = await page.evaluate((lang) => {
         const cleanLang = lang.replace(/\s+/g, '').replace(/\+\+/g, 'PP');
-        const selectors = [
-            `#soln${cleanLang} pre`,
-            `#soln${lang.replace(/\s+/g, '')} pre`,
-            `#solnCPP pre`,
-            `#solnCPP23 pre`,
-            `#solnC pre`,
-            `#solnJava pre`,
-            `#solnPython3 pre`,
-            `#solnPython pre`,
-            `div[id^="soln"] pre`
+        const solutionIds = [
+            `soln${cleanLang}`,
+            `soln${lang.replace(/\s+/g, '')}`,
+            'solnCPP',
+            'solnCPP23',
+            'solnC',
+            'solnJava',
+            'solnPython3',
+            'solnPython'
         ];
-        for (const sel of selectors) {
-            const el = document.querySelector(sel);
+        const elements = solutionIds
+            .map(id => document.getElementById(id))
+            .concat([...document.querySelectorAll('div[id^="soln"]')]);
+        for (const container of elements) {
+            const el = container ? container.querySelector('pre') : null;
             if (el && el.textContent.trim().length > 0) {
                 let text = el.textContent || el.innerText || '';
                 return text.replace(/\u00a0/g, '').trimEnd();
@@ -782,18 +785,21 @@ async function solveProblem(page, track) {
 
                 solutionCode = await page.evaluate((lang) => {
                     const cleanLang = lang.replace(/\s+/g, '').replace(/\+\+/g, 'PP');
-                    const selectors = [
-                        `#soln${cleanLang} pre`,
-                        `#soln${lang.replace(/\s+/g, '')} pre`,
-                        `#solnCPP pre`,
-                        `#solnCPP23 pre`,
-                        `#solnC pre`,
-                        `#solnJava pre`,
-                        `#solnPython3 pre`,
-                        `div[id^="soln"] pre`
+                    const solutionIds = [
+                        `soln${cleanLang}`,
+                        `soln${lang.replace(/\s+/g, '')}`,
+                        'solnCPP',
+                        'solnCPP23',
+                        'solnC',
+                        'solnJava',
+                        'solnPython3',
+                        'solnPython'
                     ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
+                    const elements = solutionIds
+                        .map(id => document.getElementById(id))
+                        .concat([...document.querySelectorAll('div[id^="soln"]')]);
+                    for (const container of elements) {
+                        const el = container ? container.querySelector('pre') : null;
                         if (el && el.textContent.trim().length > 0) {
                             let text = el.textContent || el.innerText || '';
                             return text.replace(/\u00a0/g, '').trimEnd();
